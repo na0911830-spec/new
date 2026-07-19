@@ -1,30 +1,41 @@
 zerops:
   # supports monorepositories, just add
   # one setup section after the other
-  - setup: ubuntu
+  - setup: streamion
     # ==== how to build your application ====
     build:
       # select what technology should the
       # build container be based on, can
       # be different from service technology
       # see docs for full list
-      base: ubuntu@26.04
+      base: ubuntu@latest
 
       # *optional* add additional dependencies
       # on top of base technology (combination
       # will be cached for next build)
-      # prepareCommands:
-      #   - apt-get something
+      prepareCommands:
+        - sudo apt-get update
+        - sudo apt-get install -y golang-go ffmpeg curl unzip git
+        # Install Deno
+        - curl -fsSL https://deno.land/x/install/install.sh | sh
+        - sudo mv /root/.deno/bin/deno /usr/local/bin/deno
 
       # build your application
       buildCommands:
-        - echo 'while true; do echo "running"; sleep 15; done' > run.sh
-        - chmod +x run.sh
+        # Build the Go proxy binaries
+        - CGO_ENABLED=0 go build -ldflags '-s' -o server server.go
+        - CGO_ENABLED=0 go build -ldflags '-s' -o warp warp.go
 
       # select which files / folders to deploy
       # after the build successfully finished
       deployFiles:
-        - run.sh
+        - server
+        - warp
+        - src
+        - config
+        - deno.json
+        - deno.lock
+        - entrypoint.sh
 
       # *optional*: which files / folders
       # to cache for the next use
@@ -32,17 +43,30 @@ zerops:
 
     # ==== how to run your application ====
     run:
-      base: ubuntu@26.04
+      base: ubuntu@latest
 
       # *optional* install dependencies that your
       # runtime service requires (will be cached)
-      # prepareCommands:
-      #   - apt-get something
+      prepareCommands:
+        # Install runtime dependencies, Deno, and place Go binaries in path
+        - sudo apt-get update
+        - sudo apt-get install -y ffmpeg curl unzip
+        # Install Deno
+        - curl -fsSL https://deno.land/x/install/install.sh | sh
+        - sudo mv /root/.deno/bin/deno /usr/local/bin/deno
+        # Move Go binaries to system path
+        - sudo cp server /usr/local/bin/server
+        - sudo cp warp /usr/local/bin/warp
+        - sudo chmod +x /usr/local/bin/server /usr/local/bin/warp
 
       # *optional*: triggered before each start/restart
       # of your application, to eg. clean cache
       # initCommands:
       #  - rm -rf ./cache
 
+      ports:
+        - port: 7860
+          httpSupport: true
+
       # how to start your application
-      start: ./run.sh
+      start: ./entrypoint.sh
