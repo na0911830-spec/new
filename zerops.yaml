@@ -1,0 +1,40 @@
+zerops:
+  # The service name must match the name of the service created in Zerops GUI/API
+  - setup: streamion
+    build:
+      base: ubuntu@latest
+      prepareCommands:
+        - sudo apt-get update
+        - sudo apt-get install -y golang-go ffmpeg curl unzip git
+        # Install Deno
+        - curl -fsSL https://deno.land/x/install/install.sh | sh
+        - sudo mv /root/.deno/bin/deno /usr/local/bin/deno
+      buildCommands:
+        # Build the Go proxy binaries
+        - CGO_ENABLED=0 go build -ldflags '-s' -o server server.go
+        - CGO_ENABLED=0 go build -ldflags '-s' -o warp warp.go
+      deployFiles:
+        - server
+        - warp
+        - src
+        - config
+        - deno.json
+        - deno.lock
+        - entrypoint.sh
+    run:
+      base: ubuntu@latest
+      prepareCommands:
+        # Install runtime dependencies, Deno, and place Go binaries in path
+        - sudo apt-get update
+        - sudo apt-get install -y ffmpeg curl unzip
+        # Install Deno
+        - curl -fsSL https://deno.land/x/install/install.sh | sh
+        - sudo mv /root/.deno/bin/deno /usr/local/bin/deno
+        # Move Go binaries to system path
+        - sudo cp server /usr/local/bin/server
+        - sudo cp warp /usr/local/bin/warp
+        - sudo chmod +x /usr/local/bin/server /usr/local/bin/warp
+      ports:
+        - port: 7860
+          httpSupport: true
+      start: ./entrypoint.sh

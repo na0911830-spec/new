@@ -1,0 +1,163 @@
+import { retry, type RetryOptions } from "@std/async";
+import type { Config } from "./config.ts";
+import { generateRandomIPv6 } from "./ipv6Rotation.ts";
+import { getCurrentProxy } from "./proxyManager.ts";
+
+type FetchInputParameter = Parameters<typeof fetch>[0];
+type FetchInitParameterWithClient =
+    | RequestInit
+    | RequestInit & { client: Deno.HttpClient };
+type FetchReturn = ReturnType<typeof fetch>;
+
+export const getFetchClient = (config: Config): {
+    (
+        input: FetchInputParameter,
+        init?: FetchInitParameterWithClient,
+    ): FetchReturn;
+} => {
+    return async (
+        input: FetchInputParameter,
+        init?: RequestInit,
+    ) => {
+        // Use auto-fetched proxy if enabled, otherwise use configured proxy
+        const proxyAddress = config.networking.auto_proxy
+            ? getCurrentProxy()
+            : config.networking.proxy;
+        const ipv6Block = config.networking.ipv6_block;
+
+        // If proxy or IPv6 rotation is configured, create a custom HTTP client
+        if (proxyAddress || ipv6Block) {
+            const clientOptions: Deno.CreateHttpClientOptions = {};
+
+            if (proxyAddress) {
+                try {
+                    const proxyUrl = new URL(proxyAddress);
+                    // Extract credentials if present
+                    if (proxyUrl.username && proxyUrl.password) {
+                        clientOptions.proxy = {
+                            url: `${proxyUrl.protocol}//${proxyUrl.host}`,
+                            basicAuth: {
+                                username: decodeURIComponent(proxyUrl.username),
+                                password: decodeURIComponent(proxyUrl.password),
+                            },
+                        };
+                    } else {
+                        clientOptions.proxy = {
+                            url: proxyAddress,
+                        };
+                    }
+                } catch {
+                    clientOptions.proxy = {
+                        url: proxyAddress,
+                    };
+                }
+            }
+
+            if (ipv6Block) {
+                clientOptions.localAddress = generateRandomIPv6(ipv6Block);
+            }
+
+            const client = Deno.createHttpClient(clientOptions);
+            const fetchRes = await fetchShim(config, input, {
+                client,
+                headers: init?.headers,
+                method: init?.method,
+                body: init?.body,
+            });
+
+            if (!fetchRes.body) {
+                client.close();
+                return new Response(null, {
+                    status: fetchRes.status,
+                    headers: fetchRes.headers,
+                });
+            }
+
+            const originalBody = fetchRes.body;
+            let streamFinished = false;
+            const finalizeClient = () => {
+                if (!streamFinished) {
+                    streamFinished = true;
+                    try {
+                        client.close();
+                    } catch { }
+                }
+            };
+
+            const newBody = new ReadableStream({
+                async start(controller) {
+                    const reader = originalBody.getReader();
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+                            controller.enqueue(value);
+                        }
+                        controller.close();
+                    } catch (e: any) {
+                        const msg: string = e?.message || String(e);
+                        // "error reading a body from connection" is a normal TCP reset
+                        // (e.g. client disconnected). Log at debug level, not error.
+                        if (msg.includes("error reading a body from connection")) {
+                            console.debug("[getFetchClient] Stream closed by remote:", msg);
+                        } else {
+                            console.error("[getFetchClient] Error reading stream:", msg);
+                        }
+                        // Signal the response consumer that the stream ended prematurely,
+                        // but do NOT re-throw — that would surface as an unhandled rejection.
+                        try { controller.error(e); } catch { /* already errored/closed */ }
+                        // Rotate proxy asynchronously if auto_proxy is enabled
+                        if (config.networking.auto_proxy) {
+                            import("./proxyManager.ts").then(m => m.markProxyFailed()).catch(() => { });
+                        }
+                    } finally {
+                        reader.releaseLock();
+                        finalizeClient();
+                    }
+                },
+                cancel(reason) {
+                    originalBody.cancel(reason).catch(() => { });
+                    finalizeClient();
+                }
+            });
+
+            return new Response(newBody, {
+                status: fetchRes.status,
+                headers: fetchRes.headers,
+            });
+        }
+
+        return fetchShim(config, input, init);
+    };
+};
+
+function fetchShim(
+    config: Config,
+    input: FetchInputParameter,
+    init?: FetchInitParameterWithClient,
+): FetchReturn {
+    const fetchTimeout = config.networking.fetch?.timeout_ms;
+    const fetchRetry = config.networking.fetch?.retry?.enabled;
+    const fetchMaxAttempts = config.networking.fetch?.retry?.times;
+    const fetchInitialDebounce = config.networking.fetch?.retry
+        ?.initial_debounce;
+    const fetchDebounceMultiplier = config.networking.fetch?.retry
+        ?.debounce_multiplier;
+    const retryOptions: RetryOptions = {
+        maxAttempts: fetchMaxAttempts,
+        minTimeout: fetchInitialDebounce,
+        multiplier: fetchDebounceMultiplier,
+        jitter: 0,
+    };
+
+    const callFetch = () =>
+        fetch(input, {
+            // only set the AbortSignal if the timeout is supplied in the config
+            signal: fetchTimeout
+                ? AbortSignal.timeout(Number(fetchTimeout))
+                : null,
+            ...(init || {}),
+        });
+    // if retry enabled, call retry with the fetch shim, otherwise pass the fetch shim back directly
+    return fetchRetry ? retry(callFetch, retryOptions) : callFetch();
+}
