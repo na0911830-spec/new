@@ -1,0 +1,5 @@
+{
+  "rewrites": [
+    { "source": "/ytm2muzo", "destination": "https://allnewuser-muzo.hf.space/ytm2muzo" }
+  ]
+}
