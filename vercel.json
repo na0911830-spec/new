@@ -1,5 +1,12 @@
 {
   "rewrites": [
-    { "source": "/ytm2muzo", "destination": "https://allnewuser-muzo.hf.space/ytm2muzo" }
+    { 
+      "source": "/ytm2muzo", 
+      "destination": "https://allnewuser-muzo.hf.space/ytm2muzo" 
+    },
+    { 
+      "source": "/api/:match*", 
+      "destination": "https://allnewuser-muzo.hf.space/api/:match*" 
+    }
   ]
 }
